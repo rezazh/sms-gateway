@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: docker.arvancloud.ir/postgres:15-alpine
+    container_name: sms_postgres
+    environment:
+      POSTGRES_DB: sms_gateway
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: docker.arvancloud.ir/redis:7-alpine
+    container_name: sms_redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: docker.arvancloud.ir/rabbitmq:3-management-alpine
+    container_name: sms_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build: .
+    container_name: sms_api
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=True
+      - SECRET_KEY=django-insecure-change-this-in-production-xyz123
+      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0
+      - DB_NAME=sms_gateway
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres123
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=amqp://admin:admin123@rabbitmq:5672//
+      - SMS_COST_PER_MESSAGE=0.10
+      - EXPRESS_MULTIPLIER=2.0
+      - DEFAULT_RATE_LIMIT_PER_MINUTE=100
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

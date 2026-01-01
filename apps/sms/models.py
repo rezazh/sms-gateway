@@ -81,13 +81,12 @@ class SMSMessage(models.Model):
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['user', '-created_at']),
-
-            models.Index(fields=['user', 'status', '-created_at']),
-
-            models.Index(fields=['status', 'priority']),
-
             models.Index(fields=['recipient']),
-            models.Index(fields=['scheduled_at']),
+            models.Index(
+                fields=['scheduled_at'],
+                name='sms_pending_schedule_idx',
+                condition=models.Q(status='queued')
+            ),
         ]
 
     def __str__(self):

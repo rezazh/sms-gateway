@@ -66,6 +66,7 @@ DATABASES = {
         'PASSWORD': config('DB_PASSWORD'),
         'HOST': config('DB_HOST'),
         'PORT': config('DB_PORT', default='5432'),
+        'CONN_MAX_AGE': 60,
     }
 }
 
@@ -124,11 +125,23 @@ CELERY_TASK_QUEUES = {
     'normal_sms': {
         'exchange': 'normal_sms',
         'routing_key': 'normal_sms',
+        'queue_arguments': {
+            'x-dead-letter-exchange': 'dlx',
+            'x-dead-letter-routing-key': 'dead_sms',
+        }
     },
     'express_sms': {
         'exchange': 'express_sms',
         'routing_key': 'express_sms',
+        'queue_arguments': {
+            'x-dead-letter-exchange': 'dlx',
+            'x-dead-letter-routing-key': 'dead_sms',
+        }
     },
+    'dead_sms_queue': {
+        'exchange': 'dlx',
+        'routing_key': 'dead_sms',
+    }
 }
 
 

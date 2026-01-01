@@ -4,12 +4,15 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, OpenApiParameter
+
+from core.pagination import FastPagination
 from .services import CreditService
 from .serializers import (
     CreditAccountSerializer,
     CreditTransactionSerializer,
     ChargeAccountSerializer
 )
+from ..sms.serializers import SMSMessageSerializer
 
 
 class CreditBalanceView(APIView):
@@ -117,9 +120,7 @@ class CreditTransactionsView(APIView):
     def get(self, request):
         limit = int(request.query_params.get('limit', 100))
         transactions = CreditService.get_transactions(request.user, limit=limit)
-        serializer = CreditTransactionSerializer(transactions, many=True)
-
-        return Response({
-            'count': len(serializer.data),
-            'results': serializer.data
-        })
+        paginator = FastPagination()
+        paginated_messages = paginator.paginate_queryset(transactions, request)
+        serializer = SMSMessageSerializer(paginated_messages, many=True)
+        return paginator.get_paginated_response(serializer.data)

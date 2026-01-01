@@ -17,4 +17,8 @@ app.conf.beat_schedule = {
         'task': 'apps.sms.tasks.process_scheduled_sms',
         'schedule': 30.0,
     },
+    'flush-sms-statuses': {
+        'task': 'apps.sms.tasks.flush_sms_buffer_task',
+        'schedule': 5.0,
+    },
 }

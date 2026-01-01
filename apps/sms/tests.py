@@ -1,6 +1,11 @@
+from unittest.mock import patch , mock_open
+
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from decimal import Decimal
+
+from django.urls import reverse
+
 from .services import SMSService
 from .models import SMSMessage
 from apps.credits.services import CreditService
@@ -36,17 +41,19 @@ class SMSServiceTestCase(TestCase):
         cost = SMSService.calculate_sms_cost('express')
         self.assertEqual(cost, Decimal('0.20'))
 
-    def test_create_sms(self):
-        sms = SMSService.create_sms(
-            user=self.user,
-            recipient='09123456789',
-            message='Test message',
-            priority='normal'
-        )
-        self.assertIsNotNone(sms)
-        self.assertEqual(sms.status, 'queued')
-        self.assertEqual(sms.cost, Decimal('0.10'))
-        self.assertEqual(sms.recipient, '09123456789')
+    @patch('apps.sms.views.ingest_sms_task.apply_async')
+    def test_create_sms_api(self, mock_task):
+        url = reverse('sms:send')
+        data = {
+            'recipient': '09123456789',
+            'message': 'Test Message'
+        }
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.data['success'])
+
+        mock_task.assert_called_once()
 
     def test_create_sms_insufficient_balance(self):
         user2 = User.objects.create_user(

@@ -2,6 +2,8 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from django_redis import get_redis_connection
+
 from .models import SMSMessage
 from apps.credits.services import CreditService
 import logging
@@ -121,3 +123,41 @@ class SMSService:
             'pending': pending,
             'success_rate': round((sent / total * 100) if total > 0 else 0, 2)
         }
+
+
+class SMSStatusBuffer:
+    KEY = "sms_status_buffer"
+
+    @staticmethod
+    def push_update(sms_id, status, failed_reason=""):
+        data = f"{sms_id}:{status}:{failed_reason}"
+        redis_conn = get_redis_connection("default")
+        redis_conn.rpush(SMSStatusBuffer.KEY, data)
+
+    @staticmethod
+    def flush_buffer():
+        redis_conn = get_redis_connection("default")
+        items = redis_conn.lpop(SMSStatusBuffer.KEY, 1000)
+
+        if not items:
+            return
+
+        updates = {}
+        for item in items:
+            sms_id, status, reason = item.decode('utf-8').split(':', 2)
+            updates[sms_id] = {'status': status, 'reason': reason}
+
+        if updates:
+            from .models import SMSMessage
+            sms_list = SMSMessage.objects.filter(id__in=updates.keys())
+
+            to_update = []
+            for sms in sms_list:
+                data = updates[str(sms.id)]
+                sms.status = data['status']
+                if data['reason']:
+                    sms.failed_reason = data['reason']
+                to_update.append(sms)
+
+            SMSMessage.objects.bulk_update(to_update, ['status', 'failed_reason'])
+            logger.info(f"Bulk updated {len(to_update)} SMS statuses")

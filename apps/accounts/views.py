@@ -1,3 +1,4 @@
+from django_redis import get_redis_connection
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -5,6 +6,8 @@ from django.db import connection
 from django.core.cache import cache
 from drf_spectacular.utils import extend_schema
 import redis
+
+from apps.sms.services import SMSStatusBuffer
 
 
 class HealthCheckView(APIView):
@@ -42,44 +45,68 @@ class HealthCheckView(APIView):
     def get(self, request):
         health_status = {
             'status': 'healthy',
-            'services': {}
+            'components': {}
         }
+
+        has_error = False
+        is_degraded = False
 
         try:
             connection.ensure_connection()
-            health_status['services']['database'] = 'healthy'
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+            health_status['components']['database'] = 'ok'
         except Exception as e:
-            health_status['services']['database'] = f'unhealthy: {str(e)}'
-            health_status['status'] = 'unhealthy'
+            health_status['components']['database'] = f'error: {str(e)}'
+            has_error = True
 
         try:
-            cache.set('health_check', 'ok', 10)
-            if cache.get('health_check') == 'ok':
-                health_status['services']['redis'] = 'healthy'
-            else:
-                health_status['services']['redis'] = 'unhealthy'
-                health_status['status'] = 'unhealthy'
+            redis_conn = get_redis_connection("default")
+            redis_conn.ping()
+            health_status['components']['redis'] = 'ok'
         except Exception as e:
-            health_status['services']['redis'] = f'unhealthy: {str(e)}'
-            health_status['status'] = 'unhealthy'
+            health_status['components']['redis'] = f'error: {str(e)}'
+            has_error = True
 
         try:
-            from config.celery import app
-            inspect = app.control.inspect()
-            active = inspect.active()
-            if active:
-                health_status['services']['celery'] = 'healthy'
+            redis_conn = get_redis_connection("default")
+            buffer_size = redis_conn.llen(SMSStatusBuffer.KEY)
+            health_status['components']['sms_buffer_size'] = buffer_size
+
+            if buffer_size > 10000:
+                is_degraded = True
+                health_status['components']['sms_buffer_status'] = 'warning: high backlog'
             else:
-                health_status['services']['celery'] = 'no workers'
-                health_status['status'] = 'degraded'
+                health_status['components']['sms_buffer_status'] = 'ok'
+
+        except Exception:
+            pass
+
+        try:
+            celery_status = cache.get('health_celery_status')
+            if not celery_status:
+                from config.celery import app
+                i = app.control.inspect(timeout=0.5)
+                active_workers = i.active()
+
+                if active_workers:
+                    celery_status = 'ok'
+                    cache.set('health_celery_status', 'ok', 10)
+                else:
+                    celery_status = 'no workers found'
+                    is_degraded = True
+
+            health_status['components']['celery'] = celery_status
+
         except Exception as e:
-            health_status['services']['celery'] = f'unhealthy: {str(e)}'
+            health_status['components']['celery'] = f'warning: {str(e)}'
+            is_degraded = True
+
+        if has_error:
             health_status['status'] = 'unhealthy'
-
-        status_code = status.HTTP_200_OK
-        if health_status['status'] == 'unhealthy':
-            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        elif health_status['status'] == 'degraded':
-            status_code = status.HTTP_200_OK
-
-        return Response(health_status, status=status_code)
+            return Response(health_status, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        elif is_degraded:
+            health_status['status'] = 'degraded'
+            return Response(health_status, status=status.HTTP_200_OK)
+        else:
+            return Response(health_status, status=status.HTTP_200_OK)

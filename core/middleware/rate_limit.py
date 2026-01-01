@@ -1,8 +1,7 @@
-from django.core.cache import cache
+import time
 from django.http import JsonResponse
 from rest_framework import status
 from django_redis import get_redis_connection
-import time
 
 
 class RateLimitMiddleware:
@@ -18,42 +17,51 @@ class RateLimitMiddleware:
             ident = f"user_{request.user.id}"
             limit = request.user.rate_limit_per_minute
         else:
-            ident = f"ip_{self.get_client_ip(request)}"
-            limit = 10
+            ip = self.get_client_ip(request)
+            ident = f"ip_{ip}"
+            limit = 20
 
+        if self.is_rate_limited(ident, limit):
+            return JsonResponse(
+                {
+                    'error': 'Too Many Requests',
+                    'detail': f'Rate limit exceeded. Maximum {limit} requests per minute.',
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
 
-        current_minute = int(time.time() / 60)
-        cache_key = f"ratelimit:{ident}:{current_minute}"
+        return self.get_response(request)
+
+    def is_rate_limited(self, ident, limit):
+        redis_conn = get_redis_connection("default")
+        key = f"ratelimit:sliding:{ident}"
+        now = time.time()
+        window_start = now - 60
 
         try:
-            redis_conn = get_redis_connection("default")
             pipeline = redis_conn.pipeline()
-            pipeline.incr(cache_key)
-            pipeline.expire(cache_key, 60)
-            result = pipeline.execute()
 
-            request_count = result[0]
+            pipeline.zremrangebyscore(key, 0, window_start)
+
+            pipeline.zadd(key, {f"{now}": now})
+
+            pipeline.zcard(key)
+
+            pipeline.expire(key, 120)
+
+            results = pipeline.execute()
+
+            request_count = results[2]
 
             if request_count > limit:
-                return JsonResponse(
-                    {
-                        'error': 'Too Many Requests',
-                        'detail': f'Rate limit exceeded. Maximum {limit} requests per minute.',
-                    },
-                    status=status.HTTP_429_TOO_MANY_REQUESTS
-                )
+                redis_conn.zrem(key, f"{now}")
+                return True
 
-            response = self.get_response(request)
-
-            response['X-RateLimit-Limit'] = str(limit)
-            response['X-RateLimit-Remaining'] = str(max(0, limit - request_count))
-            response['X-RateLimit-Reset'] = str((current_minute + 1) * 60)
-
-            return response
+            return False
 
         except Exception as e:
             print(f"Rate limit error: {e}")
-            return self.get_response(request)
+            return False
 
     def get_client_ip(self, request):
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')

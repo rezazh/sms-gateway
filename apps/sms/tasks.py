@@ -19,50 +19,34 @@ IS_SHUTTING_DOWN = False
 
 @shared_task(bind=True, max_retries=3)
 def send_sms_task(self, sms_id):
+    from .models import SMSMessage
+
     try:
-        sms = SMSMessage.objects.get(id=sms_id)
+        sms = SMSMessage.objects.only('recipient', 'message', 'retry_count').get(id=sms_id)
 
         logger.info(f"Starting SMS send - ID: {sms_id}")
 
-        sms.status = 'sending'
-        sms.save()
-
-        time.sleep(2)
+        time.sleep(0.5)
 
         if random.random() < 0.9:
-            sms.mark_as_sent()
-            logger.info(
-                f"SMS sent successfully - ID: {sms_id}, "
-                f"Recipient: {sms.recipient}"
-            )
-            return {
-                'status': 'success',
-                'sms_id': str(sms.id),
-                'recipient': sms.recipient
-            }
+            SMSStatusBuffer.push_update(str(sms.id), 'sent')
+            logger.info(f"SMS sent successfully - ID: {sms_id}")
+            return {'status': 'success'}
         else:
             raise Exception("SMS provider error")
 
     except SMSMessage.DoesNotExist:
         logger.error(f"SMS not found - ID: {sms_id}")
-        return {'status': 'error', 'message': 'SMS not found'}
+        return
 
     except Exception as e:
-        sms.mark_as_failed(str(e))
-        logger.error(
-            f"SMS send failed - ID: {sms_id}, "
-            f"Error: {str(e)}, Retry count: {sms.retry_count}"
-        )
+        error_msg = str(e)
+        SMSStatusBuffer.push_update(str(sms.id), 'failed', error_msg)
 
-        if sms.can_retry():
-            logger.info(f"Retrying SMS - ID: {sms_id}")
+        logger.error(f"SMS send failed - ID: {sms_id}: {error_msg}")
+
+        if sms.retry_count < 3:
             raise self.retry(exc=e, countdown=60)
-
-        return {
-            'status': 'failed',
-            'sms_id': str(sms.id),
-            'reason': str(e)
-        }
 
 @shared_task
 def process_scheduled_sms():
@@ -102,30 +86,11 @@ def retry_failed_sms():
     }
 
 
-@shared_task(bind=True)
-def ingest_sms_task(self, sms_data):
-    from django.contrib.auth import get_user_model
-    from .models import SMSMessage
-
-    User = get_user_model()
-
-    try:
-        sms = SMSMessage.objects.create(
-            id=sms_data['id'],
-            user_id=sms_data['user_id'],
-            recipient=sms_data['recipient'],
-            message=sms_data['message'],
-            priority=sms_data['priority'],
-            cost=Decimal(sms_data['cost']),
-            scheduled_at=sms_data['scheduled_at'],
-            status='queued'
-        )
-
-        if not sms.scheduled_at:
-            process_sms_sending.delay(sms.id)
-
-    except Exception as e:
-        logger.error(f"Failed to ingest SMS {sms_data['id']}: {e}")
+@shared_task
+def batch_ingest_sms():
+    from .services import SMSService
+    processed_count = SMSService.process_ingest_buffer(batch_size=5000)
+    return f"Ingested {processed_count} messages"
 
 
 @shared_task(bind=True, max_retries=3)

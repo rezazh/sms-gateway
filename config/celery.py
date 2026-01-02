@@ -21,4 +21,8 @@ app.conf.beat_schedule = {
         'task': 'apps.sms.tasks.flush_sms_buffer_task',
         'schedule': 5.0,
     },
+    'batch-ingest-sms': {
+        'task': 'apps.sms.tasks.batch_ingest_sms',
+        'schedule': 2.0,
+    },
 }

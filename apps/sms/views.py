@@ -14,7 +14,6 @@ from .serializers import (
     SMSStatisticsSerializer
 )
 import uuid
-from .tasks import ingest_sms_task
 
 class SendSMSView(APIView):
     permission_classes = [IsAuthenticated]
@@ -44,53 +43,41 @@ class SendSMSView(APIView):
         }
     )
     def post(self, request):
-        request_id = request.headers.get('X-Request-ID')
-
-        if not request_id:
-            request_id = str(uuid.uuid4())
-
+        request_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
         redis_conn = get_redis_connection("default")
         idempotency_key = f"idempotency:{request.user.id}:{request_id}"
-
         if not redis_conn.setnx(idempotency_key, "processing"):
-            return Response(
-                {"error": "Duplicate request. This ID has already been processed."},
-                status=status.HTTP_409_CONFLICT
-            )
-
+            return Response({"error": "Duplicate request"}, status=409)
         redis_conn.expire(idempotency_key, 86400)
 
-        serializer = CreateSMSSerializer(data=request.data)
-
-        if not serializer.is_valid():
-            redis_conn.delete(idempotency_key)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        sms_id = str(uuid.uuid4())
+        data = request.data
+        recipient = data.get('recipient')
+        message = data.get('message')
+        priority = data.get('priority', 'normal')
+        scheduled_at = data.get('scheduled_at')
 
         try:
-            from .services import SMSService
-            cost = SMSService.calculate_sms_cost(serializer.validated_data.get('priority', 'normal'))
+            if not recipient or not message:
+                raise ValueError("Recipient and message are required")
+
+            recipient = SMSService.validate_phone_number(recipient)
+            cost = SMSService.calculate_sms_cost(priority)
 
             from apps.credits.services import CreditService
             CreditService.deduct_balance(request.user, cost)
 
-            sms_data = {
+            sms_id = str(uuid.uuid4())
+            sms_payload = {
                 'id': sms_id,
                 'user_id': request.user.id,
-                'recipient': serializer.validated_data['recipient'],
-                'message': serializer.validated_data['message'],
-                'priority': serializer.validated_data.get('priority', 'normal'),
+                'recipient': recipient,
+                'message': message,
+                'priority': priority,
                 'cost': str(cost),
-                'scheduled_at': serializer.validated_data.get('scheduled_at')
+                'scheduled_at': scheduled_at
             }
 
-            queue_name = 'express_sms' if sms_data['priority'] == 'express' else 'normal_sms'
-
-            ingest_sms_task.apply_async(
-                args=[sms_data],
-                queue=queue_name
-            )
+            SMSService.queue_sms_for_ingest(sms_payload)
 
             return Response(
                 {
@@ -104,7 +91,11 @@ class SendSMSView(APIView):
             )
 
         except ValueError as e:
+            redis_conn.delete(idempotency_key)
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            redis_conn.delete(idempotency_key)
+            return Response({'error': 'Internal error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class SMSListView(APIView):

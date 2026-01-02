@@ -7,6 +7,7 @@ from django_redis import get_redis_connection
 from .models import SMSMessage
 from apps.credits.services import CreditService
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -124,13 +125,74 @@ class SMSService:
             'success_rate': round((sent / total * 100) if total > 0 else 0, 2)
         }
 
+    @staticmethod
+    def queue_sms_for_ingest(sms_data):
+        redis_conn = get_redis_connection("default")
+        redis_conn.rpush(SMSService.INGEST_BUFFER_KEY, json.dumps(sms_data))
+
+    @staticmethod
+    def process_ingest_buffer(batch_size=2000):
+        redis_conn = get_redis_connection("default")
+
+        try:
+            raw_items = redis_conn.lpop(SMSService.INGEST_BUFFER_KEY, batch_size)
+        except Exception:
+            return 0
+
+        if not raw_items:
+            return 0
+
+        sms_objects = []
+        task_payloads = []
+
+        try:
+            for item in raw_items:
+                if isinstance(item, bytes):
+                    item = item.decode('utf-8')
+
+                data = json.loads(item)
+                sms = SMSMessage(
+                    id=data['id'],
+                    user_id=data['user_id'],
+                    recipient=data['recipient'],
+                    message=data['message'],
+                    priority=data['priority'],
+                    cost=Decimal(data['cost']),
+                    scheduled_at=data.get('scheduled_at'),
+                    status='queued'
+                )
+                sms_objects.append(sms)
+
+                if not sms.scheduled_at:
+                    task_payloads.append({'id': str(sms.id), 'priority': sms.priority})
+
+            if sms_objects:
+                SMSMessage.objects.bulk_create(sms_objects, batch_size=batch_size, ignore_conflicts=True)
+
+                from .tasks import send_sms_task
+                for payload in task_payloads:
+                    queue = 'express_sms' if payload['priority'] == 'express' else 'normal_sms'
+                    send_sms_task.apply_async(args=[payload['id']], queue=queue)
+
+        except Exception as e:
+            logger.error(f"CRITICAL: Failed to ingest batch. Pushing back to Redis. Error: {e}")
+            if raw_items:
+                redis_conn.rpush(SMSService.INGEST_BUFFER_KEY, *raw_items)
+            raise e
+
+        return len(sms_objects)
+
 
 class SMSStatusBuffer:
     KEY = "sms_status_buffer"
 
     @staticmethod
     def push_update(sms_id, status, failed_reason=""):
-        data = f"{sms_id}:{status}:{failed_reason}"
+        data = json.dumps({
+            'id': str(sms_id),
+            'status': status,
+            'reason': failed_reason
+        })
         redis_conn = get_redis_connection("default")
         redis_conn.rpush(SMSStatusBuffer.KEY, data)
 
@@ -144,8 +206,13 @@ class SMSStatusBuffer:
 
         updates = {}
         for item in items:
-            sms_id, status, reason = item.decode('utf-8').split(':', 2)
-            updates[sms_id] = {'status': status, 'reason': reason}
+            try:
+                data = json.loads(item.decode('utf-8'))
+                sms_id = data['id']
+                updates[sms_id] = {'status': data['status'], 'reason': data['reason']}
+            except Exception as e:
+                logger.error(f"Error parsing buffer item: {e}")
+                continue
 
         if updates:
             from .models import SMSMessage
@@ -159,5 +226,5 @@ class SMSStatusBuffer:
                     sms.failed_reason = data['reason']
                 to_update.append(sms)
 
-            SMSMessage.objects.bulk_update(to_update, ['status', 'failed_reason'])
+            SMSMessage.objects.bulk_update(to_update, ['status', 'failed_reason'], batch_size=1000)
             logger.info(f"Bulk updated {len(to_update)} SMS statuses")

@@ -41,8 +41,8 @@ class SMSServiceTestCase(TestCase):
         cost = SMSService.calculate_sms_cost('express')
         self.assertEqual(cost, Decimal('0.20'))
 
-    @patch('apps.sms.views.ingest_sms_task.apply_async')
-    def test_create_sms_api(self, mock_task):
+    @patch('apps.sms.services.SMSService.queue_sms_for_ingest')
+    def test_create_sms_api(self, mock_queue):
         url = reverse('sms:send')
         data = {
             'recipient': '09123456789',
@@ -51,9 +51,7 @@ class SMSServiceTestCase(TestCase):
         response = self.client.post(url, data, format='json')
 
         self.assertEqual(response.status_code, 202)
-        self.assertTrue(response.data['success'])
-
-        mock_task.assert_called_once()
+        mock_queue.assert_called_once()
 
     def test_create_sms_insufficient_balance(self):
         user2 = User.objects.create_user(

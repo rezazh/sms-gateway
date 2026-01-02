@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from decimal import Decimal
 import uuid
+from uuid6 import uuid7
 
 
 class SMSMessage(models.Model):
@@ -22,7 +23,7 @@ class SMSMessage(models.Model):
 
     id = models.UUIDField(
         primary_key=True,
-        default=uuid.uuid4,
+        default=uuid7,
         editable=False
     )
     user = models.ForeignKey(
@@ -32,7 +33,9 @@ class SMSMessage(models.Model):
     )
     recipient = models.CharField(
         max_length=15,
-        help_text="Recipient phone number"
+        help_text="Recipient phone number",
+        db_index = True
+
     )
     message = models.TextField(
         max_length=1000,
@@ -41,7 +44,8 @@ class SMSMessage(models.Model):
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
-        default='pending'
+        default='pending',
+        db_index=True
     )
     priority = models.CharField(
         max_length=10,
@@ -78,10 +82,10 @@ class SMSMessage(models.Model):
         db_table = 'sms_messages'
         verbose_name = 'SMS Message'
         verbose_name_plural = 'SMS Messages'
-        ordering = ['-created_at']
+        ordering = ['-id']
         indexes = [
-            models.Index(fields=['user', '-created_at']),
-            models.Index(fields=['recipient']),
+            models.Index(fields=['user', '-id']),
+
             models.Index(
                 fields=['scheduled_at'],
                 name='sms_pending_schedule_idx',
@@ -94,23 +98,21 @@ class SMSMessage(models.Model):
 
     def calculate_cost(self):
         base_cost = Decimal(str(settings.SMS_COST_PER_MESSAGE))
-
         if self.priority == 'express':
             base_cost *= Decimal(str(settings.EXPRESS_MULTIPLIER))
-
         return base_cost
 
     def mark_as_sent(self):
         from django.utils import timezone
         self.status = 'sent'
         self.sent_at = timezone.now()
-        self.save()
+        self.save(update_fields=['status', 'sent_at'])
 
     def mark_as_failed(self, reason):
         self.status = 'failed'
         self.failed_reason = reason
         self.retry_count += 1
-        self.save()
+        self.save(update_fields=['status', 'failed_reason', 'retry_count'])
 
     def can_retry(self, max_retries=3):
         return self.retry_count < max_retries

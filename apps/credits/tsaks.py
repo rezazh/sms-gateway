@@ -13,15 +13,16 @@ def sync_all_balances():
     from django_redis import get_redis_connection
     redis_conn = get_redis_connection("default")
 
-    keys = redis_conn.keys("user_balance_*")
+    pattern = f"{CreditService.PENDING_DEDUCT_PREFIX}*"
+    keys = redis_conn.keys(pattern)
 
     count = 0
     for key in keys:
         try:
             user_id = int(key.decode('utf-8').split('_')[-1])
-            CreditService.sync_balance_to_db(user_id)
+            CreditService.sync_deltas_to_db(user_id)
             count += 1
         except Exception as e:
             logger.error(f"Error syncing balance for key {key}: {e}")
 
-    return f"Synced {count} account balances"
+    return f"Synced deltas for {count} accounts"

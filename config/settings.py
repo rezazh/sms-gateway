@@ -24,6 +24,8 @@ INSTALLED_APPS = [
     'apps.credits',
     'apps.sms',
     'apps.reports',
+    'django_prometheus',
+
 ]
 
 MIDDLEWARE = [
@@ -34,7 +36,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'core.middleware.rate_limit.RateLimitMiddleware',
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
 
 ]
 
@@ -114,7 +117,8 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',  # Add this
 }
 
-
+CELERY_WORKER_PREFETCH_MULTIPLIER = 10
+CELERY_ACKS_LATE = True
 CELERY_BROKER_URL = config('CELERY_BROKER_URL')
 CELERY_RESULT_BACKEND = f"redis://{config('REDIS_HOST')}:{config('REDIS_PORT')}/1"
 CELERY_ACCEPT_CONTENT = ['json']

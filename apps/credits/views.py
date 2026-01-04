@@ -121,6 +121,6 @@ class CreditTransactionsView(APIView):
         limit = int(request.query_params.get('limit', 100))
         transactions = CreditService.get_transactions(request.user, limit=limit)
         paginator = FastPagination()
-        paginated_messages = paginator.paginate_queryset(transactions, request)
-        serializer = SMSMessageSerializer(paginated_messages, many=True)
+        paginated_transactions = paginator.paginate_queryset(transactions, request)
+        serializer = CreditTransactionSerializer(paginated_transactions, many=True)
         return paginator.get_paginated_response(serializer.data)

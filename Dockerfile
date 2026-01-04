@@ -1,32 +1,36 @@
-FROM docker.arvancloud.ir/python:3.11-slim
+# استفاده از پایتون نسخه 3.10 slim برای کاهش حجم ایمیج
+FROM python:3.10-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+# تنظیم متغیرهای محیطی پایتون
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
 
-# نصب dependencies سیستمی
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    netcat-traditional \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
+# تنظیم دایرکتوری کاری
 WORKDIR /app
 
-# کپی requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# نصب پکیج‌های سیستمی مورد نیاز
+# netcat برای entrypoint.sh لازم است تا منتظر دیتابیس بماند
+# gcc و libpq-dev برای بیلد کردن پکیج‌های دیتابیس پایتون لازم هستند
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    netcat-openbsd \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# کپی entrypoint
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# کپی کردن فایل نیازمندی‌ها و نصب آن‌ها
+COPY requirements.txt /app/
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# کپی کد پروژه
-COPY . .
+# کپی کردن کل پروژه به داخل کانتینر
+COPY . /app/
 
-# ساخت پوشه logs
-RUN mkdir -p logs
+# ایجاد پوشه‌های استاتیک و مدیا
+RUN mkdir -p /app/staticfiles /app/media
 
-EXPOSE 8000
+# تنظیم پرمیشن اجرایی برای اسکریپت entrypoint
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# نقطه ورود کانتینر
+ENTRYPOINT ["/app/entrypoint.sh"]

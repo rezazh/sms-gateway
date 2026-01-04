@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class SMSService:
+    INGEST_BUFFER_KEY = "sms_ingest_buffer"
     @staticmethod
     def calculate_sms_cost(priority='normal'):
         base_cost = Decimal(str(settings.SMS_COST_PER_MESSAGE))
@@ -46,7 +47,7 @@ class SMSService:
 
         cost = SMSService.calculate_sms_cost(priority)
 
-        CreditService.deduct_balance_cache(user, cost)
+        CreditService.deduct_balance(user, cost)
 
         with transaction.atomic():
             sms = SMSMessage.objects.create(
@@ -100,6 +101,11 @@ class SMSService:
     def cancel_message(message_id, user):
         sms = SMSService.get_message_by_id(message_id, user)
 
+        if not sms:
+            raise ValueError("Message not found")
+
+        if sms.status not in ['pending', 'queued']:
+            raise ValueError("Cannot cancel message in current status")
         from django_redis import get_redis_connection
         cache_key = f"user_balance_{user.id}"
         redis_conn = get_redis_connection("default")
@@ -207,7 +213,10 @@ class SMSStatusBuffer:
         updates = {}
         for item in items:
             try:
-                data = json.loads(item.decode('utf-8'))
+                if isinstance(item, bytes):
+                    item = item.decode('utf-8')
+
+                data = json.loads(item)
                 sms_id = data['id']
                 updates[sms_id] = {'status': data['status'], 'reason': data['reason']}
             except Exception as e:
@@ -227,4 +236,6 @@ class SMSStatusBuffer:
                 to_update.append(sms)
 
             SMSMessage.objects.bulk_update(to_update, ['status', 'failed_reason'], batch_size=1000)
-            logger.info(f"Bulk updated {len(to_update)} SMS statuses")
+            logger.info(f"Bulk updated {len(to_update)} SMS statuses from buffer.")
+            return len(to_update)
+        return 0

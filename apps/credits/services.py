@@ -22,10 +22,21 @@ class CreditService:
     if balance < amount then
         return -1
     end
-    redis.call('decrby', KEYS[1], amount)
+    redis.call('incrbyfloat', KEYS[1], -amount)
     redis.call('incrbyfloat', KEYS[2], amount)
     return 1
     """
+
+    @staticmethod
+    def get_transactions(user, limit=100):
+        account = CreditService.get_or_create_account(user)
+        return CreditTransaction.objects.filter(account=account).order_by('-created_at')[:limit]
+
+
+    @staticmethod
+    def get_or_create_account(user):
+        account, _ = CreditAccount.objects.get_or_create(user=user)
+        return account
 
     @staticmethod
     def get_cache_key(user_id):
@@ -43,8 +54,11 @@ class CreditService:
 
         if balance is None:
             account, _ = CreditAccount.objects.get_or_create(user=user)
-            balance = float(account.balance)
-            redis_conn.set(cache_key, balance)
+            redis_conn.set(cache_key, str(account.balance))
+            return account.balance
+
+        if isinstance(balance, bytes):
+            balance = balance.decode('utf-8')
 
         return Decimal(str(balance))
 
@@ -62,32 +76,43 @@ class CreditService:
 
         if result == -1:
             raise ValueError("Insufficient balance")
+
         elif result == -2:
             CreditService.get_balance(user)
-            return CreditService.deduct_balance(user, amount)
+            result = deduct(keys=[cache_key, pending_key], args=[float(amount)])
+            if result == -1:
+                raise ValueError("Insufficient balance")
 
         return True
 
-    @staticmethod
-    def sync_deltas_to_db(user_id):
-        pending_key = CreditService.get_pending_key(user_id)
+    @classmethod
+    def sync_deltas_to_db(cls, user_id):
         redis_conn = get_redis_connection("default")
+        pending_key = cls.get_pending_key(user_id)
 
-        pending_amount = redis_conn.get(pending_key)
+        try:
+            delta = redis_conn.get(pending_key)
 
-        if pending_amount and float(pending_amount) > 0:
-            amount_to_sync = Decimal(pending_amount.decode('utf-8'))
+            if delta:
+                delta = float(delta)
+                if delta != 0:
+                    with transaction.atomic():
+                        account = CreditAccount.objects.select_for_update().get(user_id=user_id)
+                        amount_decimal = Decimal(str(delta))
 
-            try:
-                with transaction.atomic():
-                    CreditAccount.objects.filter(user_id=user_id).update(
-                        balance=F('balance') - amount_to_sync,
-                        total_spent=F('total_spent') + amount_to_sync
-                    )
-                    redis_conn.decrbyfloat(pending_key, float(amount_to_sync))
+                        account.balance -= amount_decimal
+                        account.total_spent += amount_decimal
 
-            except Exception as e:
-                logger.error(f"Error syncing delta for user {user_id}: {e}")
+                        account.save()
+
+                        redis_conn.incrbyfloat(pending_key, -delta)
+                    return True
+
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error syncing delta for user {user_id}: {str(e)}")
+        return False
 
     @staticmethod
     @transaction.atomic
@@ -125,9 +150,11 @@ class CreditService:
         cached_balance = redis_conn.get(cache_key)
 
         if cached_balance is not None:
+            if isinstance(cached_balance, bytes):
+                cached_balance = cached_balance.decode('utf-8')
             try:
                 CreditAccount.objects.filter(user_id=user_id).update(
-                    balance=Decimal(cached_balance.decode('utf-8'))
+                    balance=Decimal(cached_balance)
                 )
             except Exception as e:
                 logger.error(f"Error syncing balance for user {user_id}: {e}")

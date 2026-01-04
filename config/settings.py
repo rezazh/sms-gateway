@@ -157,68 +157,54 @@ DEFAULT_RATE_LIMIT_PER_MINUTE = config('DEFAULT_RATE_LIMIT_PER_MINUTE', default=
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+
     'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
+        'json': {
+            '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
+            'format': '%(asctime)s %(name)s %(levelname)s %(module)s %(funcName)s %(lineno)d %(message)s'
         },
         'simple': {
-            'format': '{levelname} {asctime} {message}',
+            'format': '{levelname} {asctime} {module} {message}',
             'style': '{',
         },
     },
-    'filters': {
-        'require_debug_false': {
-            '()': 'django.utils.log.RequireDebugFalse',
-        },
-        'require_debug_true': {
-            '()': 'django.utils.log.RequireDebugTrue',
-        },
-    },
+
     'handlers': {
-        'console': {
-            'level': 'INFO',
+        'json_console': {
             'class': 'logging.StreamHandler',
-            'formatter': 'simple',
+            'formatter': 'json',
+            'level': 'WARNING' if not DEBUG else 'DEBUG',
         },
-        'file': {
-            'level': 'INFO',
+        'error_file': {
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': BASE_DIR / 'logs' / 'sms_gateway.log',
-            'maxBytes': 1024 * 1024 * 10,  # 10 MB
+            'filename': BASE_DIR / 'logs' / 'error.log',
+            'maxBytes': 1024 * 1024 * 10,
             'backupCount': 5,
-            'formatter': 'verbose',
+            'formatter': 'json',
+            'level': 'ERROR',
         },
-        'sms_file': {
-            'level': 'INFO',
+        'general_file': {
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': BASE_DIR / 'logs' / 'sms.log',
-            'maxBytes': 1024 * 1024 * 10,  # 10 MB
+            'filename': BASE_DIR / 'logs' / 'general.log',
+            'maxBytes': 1024 * 1024 * 10,
             'backupCount': 5,
-            'formatter': 'verbose',
-        },
-        'credit_file': {
+            'formatter': 'json',
             'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': BASE_DIR / 'logs' / 'credit.log',
-            'maxBytes': 1024 * 1024 * 10,  # 10 MB
-            'backupCount': 5,
-            'formatter': 'verbose',
-        },
+        }
     },
+
     'loggers': {
+        '': {
+            'handlers': ['json_console', 'error_file'],
+            'level': 'INFO' if not DEBUG else 'DEBUG',
+        },
         'django': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO',
+            'handlers': ['json_console', 'error_file'],
+            'level': 'WARNING',
             'propagate': False,
         },
-        'apps.sms': {
-            'handlers': ['console', 'sms_file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'apps.credits': {
-            'handlers': ['console', 'credit_file'],
+        'apps': {
+            'handlers': ['json_console', 'error_file', 'general_file'],
             'level': 'INFO',
             'propagate': False,
         },

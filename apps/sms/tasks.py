@@ -90,6 +90,8 @@ def retry_failed_sms():
 def batch_ingest_sms():
     from .services import SMSService
     processed_count = SMSService.process_ingest_buffer(batch_size=5000)
+    if processed_count > 0:
+        logger.info(f"Ingested {processed_count} new SMS messages into database.")
     return f"Ingested {processed_count} messages"
 
 
@@ -115,8 +117,7 @@ def process_sms_sending(self, sms_id):
         if is_success:
             cb.record_success()
             SMSStatusBuffer.push_update(str(sms.id), 'sent')
-            logger.info(f"SMS {sms_id} sent successfully to {sms.recipient}")
-
+            logger.debug(f"SMS {sms_id} sent successfully to {sms.recipient}")
         else:
             error_msg = "Provider rejected: Invalid number"
             SMSStatusBuffer.push_update(str(sms.id), 'failed', error_msg)
@@ -149,5 +150,6 @@ def flush_sms_buffer_task():
     from .services import SMSStatusBuffer
     if IS_SHUTTING_DOWN:
         return "Skipped flush due to shutdown"
-    SMSStatusBuffer.flush_buffer()
-    return "Buffer flushed"
+    updated_count = SMSStatusBuffer.flush_buffer()
+    logger.debug(f"Flush buffer task ran. Updated {updated_count} statuses.")
+    return f"Buffer flushed, {updated_count} items processed"

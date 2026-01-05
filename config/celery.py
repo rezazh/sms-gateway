@@ -25,4 +25,8 @@ app.conf.beat_schedule = {
         'task': 'apps.sms.tasks.batch_ingest_sms',
         'schedule': 2.0,
     },
+    'maintain-db-partitions': {
+        'task': 'apps.sms.tasks.maintain_partitions',
+        'schedule': crontab(0, 0, day_of_month='1'),
+    },
 }

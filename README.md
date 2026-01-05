@@ -1,100 +1,101 @@
 # High-Performance SMS Gateway
 
-A scalable, production-ready SMS Gateway designed to handle high-throughput traffic (100M+ messages/day). Built with a focus on high availability, consistency, and resilience using Django, Celery, Redis, and PostgreSQL Partitioning.
+An enterprise-grade, high-throughput SMS Gateway designed to handle massive traffic bursts (100M+ messages/day) while maintaining strict financial consistency. This system leverages an event-driven architecture, in-memory buffering, and database partitioning to ensure scalability, reliability, and speed.
 
-This project demonstrates a complete, end-to-end solution for a real-world engineering challenge, including architectural design, implementation, comprehensive testing, and performance validation.
+## Key Engineering Highlights
 
-**For a deep dive into the design decisions, architectural patterns, and performance analysis, please read the [ARCHITECTURE.md](ARCHITECTURE.md) document.**
+### High-Throughput Ingestion (The Buffer Pattern)
+- Non-Blocking API: Decouples ingestion logic using Redis Lists as temporary write buffers. This allows the API to accept requests faster than the database can write.
+- Performance: Capable of handling ~650+ RPS on a standard node with sub-120ms latency.
+- Batch Processing: Background workers consume the buffer and perform efficient bulk_create operations to PostgreSQL (5,000 records per batch).
 
----
+### Atomic Financial Consistency (The Hybrid Model)
+- Race Condition Free: Utilizes Redis Lua Scripts for atomic balance checks and deductions, completely eliminating double-spending risks in concurrent environments.
+- Write-Behind Consistency: Implements an eventual consistency model where credit deltas are synced to PostgreSQL asynchronously, preventing database lock contention during high traffic.
 
-## 🚀 Key Features
+### Database Scalability (Partitioning)
+- Native Partitioning: Implements PostgreSQL Range Partitioning on the sms_messages table (partitioned by year).
+- Query Efficiency: Ensures indexes remain small and queries remain fast regardless of historical data volume.
+- Automated Maintenance: Background tasks automatically provision future partitions.
 
--   **High Throughput Ingestion:** Non-blocking API using a Redis buffer pattern to handle traffic bursts with response times under 120ms.
--   **Atomic Credit Management:** Concurrency-safe balance deduction using Redis Lua scripts to prevent race conditions.
--   **Database Partitioning:** Native PostgreSQL partitioning by year for long-term scalability and efficient queries.
--   **Priority Queues:** Dedicated processing channels for `Normal` and `Express` (e.g., OTP) messages.
--   **System Resilience:**
-    -   **Idempotency:** Safe handling of duplicate requests via `X-Request-ID`.
-    -   **Rate Limiting:** Nginx layer protection against DoS attacks and abusive clients.
-    -   **Circuit Breaker:** Prevents cascading failures when communicating with external providers.
--   **Monitoring:** Health checks and metrics endpoints ready for Prometheus/Grafana integration.
+### Resilience and Reliability
+- Idempotency: Enforces strict idempotency using X-Request-ID and Redis keys to prevent duplicate processing.
+- Circuit Breaker: Protects the system from cascading failures when upstream SMS providers are down or slow.
+- Rate Limiting: Nginx-level protection using the leaky bucket algorithm against DDoS and abusive clients.
+- Graceful Degradation: Automatic retry mechanisms with exponential backoff for transient failures.
 
-## 🛠 Tech Stack
+## Technology Stack
 
--   **Backend:** Python 3.10, Django 5.0, Django Rest Framework
--   **Database:** PostgreSQL 15 (with native partitioning)
--   **Cache & Message Broker:** Redis 7
--   **Asynchronous Tasks:** Celery 5.3
--   **Web/Proxy Server:** Nginx with Gunicorn
--   **Containerization:** Docker & Docker Compose
--   **Testing:** Pytest, Locust
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| Backend | Python 3.10, Django 5.0 | Core application logic and API |
+| Database | PostgreSQL 15 | Persistent storage with Table Partitioning |
+| Cache and Broker | Redis 7 | Hot storage for balances, task queues, and ingestion buffers |
+| Async Tasks | Celery 5.3 | Background processing (Sending, Ingesting, Syncing) |
+| Gateway | Nginx | Reverse proxy, static files, and rate limiting |
+| Monitoring | Prometheus | Metrics collection (RPS, Latency, Error Rates) |
+| Testing | Pytest, Locust | Unit testing, Integration testing, and Load testing |
 
----
-
-## 📦 Quick Start Guide
+## Quick Start Guide
 
 ### Prerequisites
+- Docker Engine and Docker Compose
 
--   Docker & Docker Compose
+### 1. Installation and Execution
+Clone the repository and start the full stack using Docker Compose.
 
-### 1. Setup & Run
-
-Clone the repository and run the entire stack using Docker Compose.
-
-```bash
-# Clone the repository
 git clone <your-repo-url>
-cd <project-folder>
-
-# Copy the environment file
+cd <project-root>
 cp .env.example .env
-
-# Build and start all services in the background
 docker-compose up -d --build
-```
 
-### 2. Initialize Database
+### 2. Database Initialization and Seeding
+Prepare the database with partitions and seed data for testing.
 
-Run database migrations and seed it with test users (`heavy_user` with high credit and `normal_user`).
-
-```bash
-# Apply database migrations
 docker-compose exec web python manage.py migrate
-
-# Seed the database with test data
 docker-compose exec web python manage.py seed_data
-```
 
-### 3. Run Automated Tests
+### 3. Verification and Testing
+Run the comprehensive test suite to ensure system integrity.
 
-Execute the comprehensive test suite, which covers business logic, concurrency, and partitioning.
-
-```bash
 docker-compose exec web pytest
-```
 
----
+## API Documentation
 
-## 📖 API Documentation & Usage
+The system includes auto-generated Swagger/OpenAPI documentation.
 
-Interactive Swagger UI is available at:
--   **URL:** `http://localhost/api/docs/`
+- Swagger UI: http://localhost/api/docs/
+- Redoc: http://localhost/api/schema/
 
-### Authentication
+### Authentication Flow
+This API uses API Key Authentication.
 
-The API uses API Key authentication.
+1. Retrieve API Key:
+After running seed_data, retrieve the key for the test user:
 
-1.  **Get an API Key** (after running the `seed_data` command):
-    ```bash
-    docker-compose exec web python manage.py shell -c "from apps.accounts.models import User; print(f'API Key for heavy_user: {User.objects.get(username=\'heavy_user\').api_key}')"
-    ```
-2.  Include the key in your request headers:
-    -   `X-API-KEY: <YOUR_KEY>`
+docker-compose exec web python manage.py shell -c "from apps.accounts.models import User; print(f'API Key: {User.objects.get(username=\"heavy_user\").api_key}')"
 
----
+2. Make a Request:
+Add the header X-Api-Key: <YOUR_KEY> to your requests.
 
-## 📊 Monitoring
+## Monitoring and Health
 
--   **Health Check:** `http://localhost/health/` (Verifies DB, Redis, Celery connectivity)
--   **Metrics:** `http://localhost/metrics` (Prometheus-compatible format)
+- Health Check Endpoint: GET /health/
+  Deep checks connectivity to DB, Redis, and Celery workers.
+  Returns 200 OK (Healthy), 200 OK (Degraded), or 503 Service Unavailable.
+
+- Prometheus Metrics: GET /metrics
+  Exposes standard Django metrics plus Custom counters (e.g., sms_sent_total, sms_failed_total).
+
+## Project Structure
+
+apps/
+  accounts/    # User management and Authentication
+  credits/     # Wallet logic, Transactions and Lua Scripts
+  sms/         # SMS logic, Tasks, Buffers and Partitioning
+config/        # Project settings, Celery and ASGI config
+core/          # Shared utilities (Circuit Breaker, Pagination)
+nginx/         # Nginx configuration
+tests/         # Pytest modules and Load tests
+
+For a detailed breakdown of architectural decisions, please read ARCHITECTURE.md

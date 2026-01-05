@@ -2,6 +2,9 @@ from decimal import Decimal
 
 from celery import shared_task
 from django.utils import timezone
+from prometheus_client import Counter
+from django.db import connection
+from django.core.cache import cache
 
 from core.utils import CircuitBreaker
 from .models import SMSMessage
@@ -15,7 +18,8 @@ from .services import SMSStatusBuffer
 
 logger = logging.getLogger(__name__)
 IS_SHUTTING_DOWN = False
-
+SMS_SENT_TOTAL = Counter('sms_sent_total', 'Total SMS sent successfully', ['priority'])
+SMS_FAILED_TOTAL = Counter('sms_failed_total', 'Total SMS failed', ['priority', 'reason'])
 
 @shared_task(bind=True, max_retries=3)
 def send_sms_task(self, sms_id):
@@ -30,7 +34,9 @@ def send_sms_task(self, sms_id):
 
         if random.random() < 0.9:
             SMSStatusBuffer.push_update(str(sms.id), 'sent')
-            logger.info(f"SMS sent successfully - ID: {sms_id}")
+            SMS_SENT_TOTAL.labels(priority=sms.priority).inc()
+
+            logger.debug(f"SMS sent successfully - ID: {sms_id}")
             return {'status': 'success'}
         else:
             raise Exception("SMS provider error")
@@ -42,6 +48,7 @@ def send_sms_task(self, sms_id):
     except Exception as e:
         error_msg = str(e)
         SMSStatusBuffer.push_update(str(sms.id), 'failed', error_msg)
+        SMS_FAILED_TOTAL.labels(priority=sms.priority, reason="provider_error").inc()
 
         logger.error(f"SMS send failed - ID: {sms_id}: {error_msg}")
 
@@ -88,11 +95,29 @@ def retry_failed_sms():
 
 @shared_task
 def batch_ingest_sms():
-    from .services import SMSService
-    processed_count = SMSService.process_ingest_buffer(batch_size=5000)
-    if processed_count > 0:
-        logger.info(f"Ingested {processed_count} new SMS messages into database.")
-    return f"Ingested {processed_count} messages"
+    LOCK_ID = "lock_batch_ingest_sms"
+    LOCK_EXPIRE = 60 * 5
+
+    acquire_lock = cache.add(LOCK_ID, "true", timeout=LOCK_EXPIRE)
+
+    if not acquire_lock:
+        logger.warning("Previous batch ingestion is still running. Skipping this run.")
+        return "Skipped (Locked)"
+
+    try:
+        from .services import SMSService
+        processed_count = SMSService.process_ingest_buffer(batch_size=5000)
+
+        if processed_count > 0:
+            logger.info(f"Ingested {processed_count} new SMS messages into database.")
+        return f"Ingested {processed_count} messages"
+
+    except Exception as e:
+        logger.error(f"Error during batch ingest: {e}")
+        raise e
+
+    finally:
+        cache.delete(LOCK_ID)
 
 
 @shared_task(bind=True, max_retries=3)
@@ -153,3 +178,48 @@ def flush_sms_buffer_task():
     updated_count = SMSStatusBuffer.flush_buffer()
     logger.debug(f"Flush buffer task ran. Updated {updated_count} statuses.")
     return f"Buffer flushed, {updated_count} items processed"
+
+
+@shared_task
+def maintain_partitions():
+    now = timezone.now()
+    next_year = now.year + 1
+    table_name = 'sms_messages'
+    partition_name = f"{table_name}_y{next_year}"
+
+    start_date = f"{next_year}-01-01 00:00:00+00"
+    end_date = f"{next_year + 1}-01-01 00:00:00+00"
+
+    check_sql = """
+                SELECT 1
+                FROM pg_class c
+                         JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relname = %s; \
+                """
+
+    create_sql = f"""
+        CREATE TABLE IF NOT EXISTS {partition_name} PARTITION OF {table_name}
+        FOR VALUES FROM ('{start_date}') TO ('{end_date}');
+    """
+
+    create_idx_sql = f"""
+        CREATE INDEX IF NOT EXISTS {partition_name}_created_at_idx 
+        ON {partition_name} (created_at);
+    """
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(check_sql, [partition_name])
+            exists = cursor.fetchone()
+
+            if not exists:
+                logger.info(f"Creating partition for year {next_year}: {partition_name}")
+                cursor.execute(create_sql)
+                cursor.execute(create_idx_sql)
+                return f"Created partition {partition_name}"
+            else:
+                return f"Partition {partition_name} already exists"
+
+    except Exception as e:
+        logger.error(f"Failed to maintain partitions: {e}")
+        raise e

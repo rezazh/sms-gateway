@@ -28,6 +28,10 @@ class CreditBalanceView(APIView):
     )
     def get(self, request):
         account = CreditService.get_or_create_account(request.user)
+        cached_balance = CreditService.get_balance(request.user)
+
+        account.balance = cached_balance
+
         serializer = CreditAccountSerializer(account)
         return Response(serializer.data)
 

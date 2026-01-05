@@ -1,7 +1,12 @@
 from pathlib import Path
 from decouple import config
+import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+REDIS_HOST = config('REDIS_HOST', default='redis')
+REDIS_PORT = config('REDIS_PORT', default=6379, cast=int)
 
 SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False, cast=bool)
@@ -154,58 +159,77 @@ EXPRESS_MULTIPLIER = config('EXPRESS_MULTIPLIER', default=2.0, cast=float)
 DEFAULT_RATE_LIMIT_PER_MINUTE = config('DEFAULT_RATE_LIMIT_PER_MINUTE', default=100, cast=int)
 
 # Logging Configuration
+LOG_DIR = BASE_DIR / 'logs'
+if not os.path.exists(LOG_DIR):
+    try:
+        os.makedirs(LOG_DIR)
+        print(f"Created logging directory at: {LOG_DIR}")
+    except OSError as e:
+        print(f"Failed to create logging directory: {e}")
 LOGGING = {
     'version': 1,
-    'disable_existing_loggers': False,
+    'disable_existing_loggers': True,
 
     'formatters': {
         'json': {
             '()': 'pythonjsonlogger.jsonlogger.JsonFormatter',
-            'format': '%(asctime)s %(name)s %(levelname)s %(module)s %(funcName)s %(lineno)d %(message)s'
+            'format': '%(asctime)s %(levelname)s %(name)s %(message)s %(exc_info)s',
+            'json_ensure_ascii': False,
         },
         'simple': {
-            'format': '{levelname} {asctime} {module} {message}',
-            'style': '{',
+            'format': '%(levelname)s %(asctime)s %(module)s %(message)s',
         },
     },
 
     'handlers': {
-        'json_console': {
+        'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'json',
-            'level': 'WARNING' if not DEBUG else 'DEBUG',
+            'level': 'INFO',
         },
         'error_file': {
             'class': 'logging.handlers.RotatingFileHandler',
             'filename': BASE_DIR / 'logs' / 'error.log',
-            'maxBytes': 1024 * 1024 * 10,
-            'backupCount': 5,
+            'maxBytes': 1024 * 1024 * 50,  # 50 MB
+            'backupCount': 3,
             'formatter': 'json',
             'level': 'ERROR',
         },
-        'general_file': {
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': BASE_DIR / 'logs' / 'general.log',
-            'maxBytes': 1024 * 1024 * 10,
-            'backupCount': 5,
-            'formatter': 'json',
-            'level': 'INFO',
-        }
     },
 
     'loggers': {
         '': {
-            'handlers': ['json_console', 'error_file'],
-            'level': 'INFO' if not DEBUG else 'DEBUG',
+            'handlers': ['console', 'error_file'],
+            'level': 'WARNING',
+        },
+        'apps': {
+            'handlers': ['console', 'error_file'],
+            'level': config('LOG_LEVEL', default='WARNING'),
+            'propagate': False,
         },
         'django': {
-            'handlers': ['json_console', 'error_file'],
+            'handlers': ['console', 'error_file'],
             'level': 'WARNING',
             'propagate': False,
         },
-        'apps': {
-            'handlers': ['json_console', 'error_file', 'general_file'],
-            'level': 'INFO',
+        'django.db.backends': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'celery': {
+            'handlers': ['console', 'error_file'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+        'kombu': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+        'redis': {
+            'handlers': ['console'],
+            'level': 'WARNING',
             'propagate': False,
         },
     },
@@ -228,7 +252,7 @@ SPECTACULAR_SETTINGS = {
             'ApiKeyAuth': {
                 'type': 'apiKey',
                 'in': 'header',
-                'name': 'X-API-Key'
+                'name': 'X-Api-Key'
             }
         }
     },

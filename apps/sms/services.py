@@ -63,7 +63,7 @@ class SMSService:
         sms.status = 'queued'
         sms.save()
 
-        logger.info(
+        logger.debug(
             f"SMS created - ID: {sms.id}, User: {user.username}, "
             f"Recipient: {recipient}, Cost: {cost}, Priority: {priority}"
         )
@@ -81,7 +81,7 @@ class SMSService:
 
     @staticmethod
     def get_user_messages(user, status=None, limit=100):
-        queryset = SMSMessage.objects.filter(user=user)
+        queryset = SMSMessage.objects.filter(user=user).select_related('user')
 
         if status:
             queryset = queryset.filter(status=status)
@@ -137,7 +137,7 @@ class SMSService:
         redis_conn.rpush(SMSService.INGEST_BUFFER_KEY, json.dumps(sms_data))
 
     @staticmethod
-    def process_ingest_buffer(batch_size=2000):
+    def process_ingest_buffer(batch_size=5000):
         redis_conn = get_redis_connection("default")
 
         try:

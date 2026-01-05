@@ -1,7 +1,7 @@
 import uuid
 import random
 import os
-from locust import HttpUser, task, between, events
+from locust import HttpUser, task, between
 
 DEFAULT_API_KEY = "XpDeksFh4e7sgmdLolghBL4f3a6L4TlLrlk5rtWBcUsUUfTjEi2533qK6QY5rdMO"
 
@@ -13,7 +13,7 @@ class SMSGatewayUser(HttpUser):
         self.api_key = os.environ.get("LOCUST_API_KEY", DEFAULT_API_KEY)
 
         self.client.headers.update({
-            "X-API-KEY": self.api_key,
+            "X-Api-Key": self.api_key,
             "Content-Type": "application/json"
         })
 

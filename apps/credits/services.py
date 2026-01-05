@@ -1,10 +1,11 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from django.db import transaction
-from django.core.cache import cache
 from django_redis import get_redis_connection
+from django.conf import settings
 from .models import CreditAccount, CreditTransaction
 import logging
 from django.db.models import F
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -12,26 +13,36 @@ logger = logging.getLogger(__name__)
 class CreditService:
     CACHE_KEY_PREFIX = 'user_balance_'
     PENDING_DEDUCT_PREFIX = 'pending_deduct_'
+    LOCK_PREFIX = 'lock_balance_'
+    LOCK_TIMEOUT = 5  # seconds
 
     DEDUCT_SCRIPT = """
-    local balance = tonumber(redis.call('get', KEYS[1]))
-    if not balance then
-        return -2 
-    end
-    local amount = tonumber(ARGV[1])
-    if balance < amount then
-        return -1
-    end
-    redis.call('incrbyfloat', KEYS[1], -amount)
-    redis.call('incrbyfloat', KEYS[2], amount)
-    return 1
-    """
+        local balance_str = redis.call('get', KEYS[1])
+        if not balance_str then
+            return -2 -- Cache Miss
+        end
+
+        local amount_str = ARGV[1]
+        local balance = tonumber(balance_str)
+        local amount = tonumber(amount_str)
+
+        if not balance or not amount then
+            return -3 -- Invalid Data in cache or arguments
+        end
+
+        if balance < amount then
+            return -1 -- Insufficient Funds
+        end
+
+        redis.call('incrbyfloat', KEYS[1], -amount)
+        redis.call('incrbyfloat', KEYS[2], amount)
+        return 1
+        """
 
     @staticmethod
     def get_transactions(user, limit=100):
         account = CreditService.get_or_create_account(user)
         return CreditTransaction.objects.filter(account=account).order_by('-created_at')[:limit]
-
 
     @staticmethod
     def get_or_create_account(user):
@@ -47,20 +58,32 @@ class CreditService:
         return f"{CreditService.PENDING_DEDUCT_PREFIX}{user_id}"
 
     @staticmethod
+    def get_lock_key(user_id):
+        return f"{CreditService.LOCK_PREFIX}{user_id}"
+
+    @staticmethod
     def get_balance(user):
         cache_key = CreditService.get_cache_key(user.id)
         redis_conn = get_redis_connection("default")
+
         balance = redis_conn.get(cache_key)
+        if balance is not None:
+            return Decimal(balance.decode('utf-8') if isinstance(balance, bytes) else str(balance))
 
-        if balance is None:
+        lock_key = CreditService.get_lock_key(user.id)
+
+        with redis_conn.lock(lock_key, timeout=CreditService.LOCK_TIMEOUT, blocking_timeout=3):
+            balance = redis_conn.get(cache_key)
+            if balance is not None:
+                return Decimal(balance.decode('utf-8') if isinstance(balance, bytes) else str(balance))
+
+            logger.info(f"Cache miss for user {user.id}, fetching from DB inside lock.")
             account, _ = CreditAccount.objects.get_or_create(user=user)
-            redis_conn.set(cache_key, str(account.balance))
+            current_balance_str = str(account.balance)
+
+            redis_conn.set(cache_key, current_balance_str)
+
             return account.balance
-
-        if isinstance(balance, bytes):
-            balance = balance.decode('utf-8')
-
-        return Decimal(str(balance))
 
     @staticmethod
     def deduct_balance(user, amount):
@@ -68,22 +91,41 @@ class CreditService:
         cache_key = CreditService.get_cache_key(user.id)
         pending_key = CreditService.get_pending_key(user.id)
 
+        amount_str = str(amount)
+
         if not redis_conn.exists(cache_key):
             CreditService.get_balance(user)
 
         deduct = redis_conn.register_script(CreditService.DEDUCT_SCRIPT)
-        result = deduct(keys=[cache_key, pending_key], args=[float(amount)])
 
-        if result == -1:
+        result = deduct(keys=[cache_key, pending_key], args=[amount_str])
+
+        if result == 1:
+            return True
+
+        elif result == -1:
             raise ValueError("Insufficient balance")
 
         elif result == -2:
+            logger.warning(f"Balance key evaporated for user {user.id}, retrying deduction.")
             CreditService.get_balance(user)
-            result = deduct(keys=[cache_key, pending_key], args=[float(amount)])
-            if result == -1:
-                raise ValueError("Insufficient balance")
+            retry_result = deduct(keys=[cache_key, pending_key], args=[amount_str])
 
-        return True
+            if retry_result == 1:
+                return True
+            elif retry_result == -1:
+                raise ValueError("Insufficient balance")
+            else:
+                raise ValueError(f"System error during deduction code: {retry_result}")
+
+
+        elif result == -3:
+            logger.critical(f"Invalid data found in cache for user {user.id}. Cache key: {cache_key}")
+            redis_conn.delete(cache_key)
+
+            raise ValueError("System error: Corrupted balance data")
+
+        return False
 
     @classmethod
     def sync_deltas_to_db(cls, user_id):
@@ -94,23 +136,19 @@ class CreditService:
             delta = redis_conn.get(pending_key)
 
             if delta:
-                delta = float(delta)
-                if delta != 0:
+                delta_val = Decimal(str(float(delta)))  # Convert safe
+                if delta_val > 0:
                     with transaction.atomic():
                         account = CreditAccount.objects.select_for_update().get(user_id=user_id)
-                        amount_decimal = Decimal(str(delta))
 
-                        account.balance -= amount_decimal
-                        account.total_spent += amount_decimal
-
+                        account.balance -= delta_val
+                        account.total_spent += delta_val
                         account.save()
 
-                        redis_conn.incrbyfloat(pending_key, -delta)
+                        redis_conn.incrbyfloat(pending_key, -float(delta_val))
                     return True
 
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Error syncing delta for user {user_id}: {str(e)}")
         return False
 
@@ -120,25 +158,29 @@ class CreditService:
         if amount <= 0:
             raise ValueError("Amount must be positive")
 
-        account, _ = CreditAccount.objects.get_or_create(user=user)
+        account, _ = CreditAccount.objects.select_for_update().get_or_create(user=user)
 
-        account.balance = F('balance') + Decimal(str(amount))
-        account.total_charged = F('total_charged') + Decimal(str(amount))
+        amount_decimal = Decimal(str(amount))
+        account.balance += amount_decimal
+        account.total_charged += amount_decimal
         account.save()
-        account.refresh_from_db()
 
         CreditTransaction.objects.create(
             account=account,
             transaction_type='charge',
-            amount=amount,
-            balance_before=account.balance - Decimal(str(amount)),
+            amount=amount_decimal,
+            balance_before=account.balance - amount_decimal,
             balance_after=account.balance,
             description=description
         )
 
         cache_key = CreditService.get_cache_key(user.id)
         redis_conn = get_redis_connection("default")
-        redis_conn.incrbyfloat(cache_key, float(amount))
+
+        if redis_conn.exists(cache_key):
+            redis_conn.incrbyfloat(cache_key, float(amount))
+        else:
+            redis_conn.set(cache_key, str(account.balance))
 
         logger.info(f"Account charged - User: {user.username}, Amount: {amount}")
         return account
@@ -150,11 +192,4 @@ class CreditService:
         cached_balance = redis_conn.get(cache_key)
 
         if cached_balance is not None:
-            if isinstance(cached_balance, bytes):
-                cached_balance = cached_balance.decode('utf-8')
-            try:
-                CreditAccount.objects.filter(user_id=user_id).update(
-                    balance=Decimal(cached_balance)
-                )
-            except Exception as e:
-                logger.error(f"Error syncing balance for user {user_id}: {e}")
+            pass
